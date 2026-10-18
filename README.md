@@ -75,6 +75,50 @@ allocation inside the decoder while its own counter stood at two.
 `Limits{}` is the default everywhere: 256 levels of nesting, 64 MiB per
 decoded binary.
 
+## ⛔ One picture is one copy, and a sum of lengths is not an allocation
+
+An FB2 carries its images as base64 **in the same file**, and every `<image>`
+used to build its own `data:...;base64,...` string — so a picture named a
+thousand times was allocated a thousand times. Measured with
+`runtime.MemStats`, not inferred:
+
+| file | source | heap held | parse |
+|---|---|---|---|
+| one 100 KiB image, 1 reference | 137 KB | 6.6 KB | 3 ms |
+| the same image, **1000** references | 166 KB | **139 MB** | 197 ms |
+| one 512 KiB image, **2000** references | 757 KB | **1.41 GB** | 2.3 s |
+
+The growth is linear in the number of references, so a 10 MB file reaches tens
+of gigabytes. One shared string per binary brings that last row to **360 KB and
+15 ms** — the same document, 3900× less memory.
+
+**The instrument had to be corrected first.** Summing the URL lengths said
+"1846×" both before and after the fix, because the same string counted a
+thousand times sums the same either way. A sum of lengths is not an allocation;
+the heap is. For the same reason the test asserts the **backing array**
+(`unsafe.StringData`) rather than equality — an equality check passes just as
+well on a thousand identical copies, which is exactly the defect.
+
+**And this is why there is no `MaxTotalBinary`**, though `go-richdoc/epub` has
+a `MaxTotalBytes` beside its per-entry ceiling. That reader inflates ZIP
+entries, which can be far smaller compressed than inflated, so its total cannot
+be deduced from the file's size. An FB2's binaries are base64 in the file, so
+the sum of its **distinct** binaries is at most four thirds of the source —
+bounded by the input once the repeats are shared. The difference between the
+siblings is in the format, not in how carefully each was written.
+
+## This reader is fuzzed
+
+`FuzzParse` (v0.1.1) asserts no panic, a document OR an error and never
+neither, determinism (binaries and their URLs live in maps, and Go randomises
+map iteration on purpose), the depth limit, and — the property that earns the
+target — **that the document is linear in the file**: the distinct image
+payloads, counted by backing array, add up to no more than twice the source.
+
+**14.3M executions** over 431 interesting inputs found nothing. That count is
+high because malformed XML is refused cheaply: the number says the fuzzer got
+many attempts, not that the reader was stressed in many ways.
+
 ## One representation, not two
 
 The first version of the element type had both a typed `Children` field and a

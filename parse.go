@@ -103,10 +103,34 @@ func checkDepth(src []byte, max int) error {
 	}
 }
 
-// a parser carries what the whole file needs: its limits and its images.
+// a parser carries what the whole file needs: its limits, its images, and ONE
+// data URL per image.
 type parser struct {
 	limits   Limits
 	binaries map[string]binary
+	// urls is the data URL built for each binary, kept so that a picture named
+	// a thousand times costs one copy.
+	//
+	// ⛔ Without it, every <image> built its own "data:...;base64,..." string,
+	// so the same picture was allocated once per REFERENCE. Measured on a file
+	// carrying one 512 KiB image referenced 2000 times: 757 KB of source held
+	// 1.41 GB of heap, and the growth is linear in the number of references,
+	// so a 10 MB file reaches tens of gigabytes. The heap was read with
+	// runtime.MemStats rather than inferred from string lengths, because a sum
+	// of lengths is not an allocation.
+	//
+	// A Go string assignment shares its backing array, so one entry here is
+	// shared by every reference to it: the SAME document now holds one copy.
+	//
+	// ⛔ And this is why no MaxTotalBinary follows, though go-richdoc/epub has
+	// a MaxTotalBytes beside its per-entry ceiling. That reader inflates ZIP
+	// entries, which can be far smaller compressed than they are inflated, so
+	// its total cannot be deduced from the file's size. An FB2 carries its
+	// images as base64 IN the file, so the sum of its distinct binaries is at
+	// most four thirds of the source. Bounded by the input, once the repeats
+	// are shared -- the difference between the siblings is in the format, not
+	// in how carefully each was written.
+	urls map[string]string
 }
 
 // body turns one <body> into blocks.
@@ -317,6 +341,10 @@ func (p *parser) image(e element) (richdoc.Image, bool) {
 		// wanted and the alt text is still worth something.
 		return img, true
 	}
+	if url, ok := p.urls[b.ID]; ok {
+		img.URL = url
+		return img, true
+	}
 	data := strings.Join(strings.Fields(b.Data), "")
 	// Base64 is four characters for every three bytes.
 	if len(data)/4*3 > p.limits.MaxBinary {
@@ -327,6 +355,10 @@ func (p *parser) image(e element) (richdoc.Image, bool) {
 		kind = "application/octet-stream"
 	}
 	img.URL = "data:" + kind + ";base64," + data
+	if p.urls == nil {
+		p.urls = map[string]string{}
+	}
+	p.urls[b.ID] = img.URL
 	return img, true
 }
 
